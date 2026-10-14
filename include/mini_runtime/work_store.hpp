@@ -2,6 +2,8 @@
 #include "backend.hpp"
 #include "event_registry.hpp"
 #include <deque>
+#include <condition_variable>
+#include <stop_token>
 
 namespace mini_runtime::detail {
 enum class NodeState { EMPTY, STAGED, QUEUED, PROCESSING, RETIRED };
@@ -78,6 +80,8 @@ class WorkStore {
     CompletionNode* completion_head_ = nullptr;
     CompletionNode* completion_tail_ = nullptr;
     size_t completion_size_ = 0;
+    bool closing_ = false;
+    std::condition_variable_any ready_cv_, completion_cv_, drain_cv_;
     // Caller holds Coordinator; only EMPTY/STAGED nodes may be published.
     void enqueue_locked(CompletionNode& node) noexcept {
         node.next = nullptr;
@@ -86,6 +90,7 @@ class WorkStore {
         else completion_head_ = &node;
         completion_tail_ = &node;
         ++completion_size_;
+        completion_cv_.notify_all();
     }
     void allocation(AdmissionPoint p) { if (gate_ && !gate_->allow(p)) throw std::bad_alloc(); }
     static Result<EventHandle,RuntimeError> fail(ErrorCode c) {
@@ -133,7 +138,8 @@ public:
             allocation(AdmissionPoint::SubmissionRegistry);
             submissions_.emplace(t,context);
             allocation(AdmissionPoint::ReadyQueue);
-            ready_.push_back(j); // Final commit; no throwing operations follow.
+            ready_.push_back(j);
+            ready_cv_.notify_all(); // Final commit; no throwing operations follow.
             return Result<EventHandle,RuntimeError>::ok(*handle);
         } catch (const std::bad_alloc&) {
             submissions_.erase(t);
@@ -141,6 +147,32 @@ public:
             if (handle) events_.release_event_locked(*handle);
             return fail(ErrorCode::OUT_OF_MEMORY);
         }
+    }
+    // Runtime closes admission and calls this under the same selection lock.
+    void cancel_ready_locked() noexcept {
+        closing_ = true;
+        for (auto id : ready_) {
+            auto& context = *jobs_.at(id).context;
+            context.phase = SubmissionPhase::REJECTED;
+            context.node.payload = CompletionReason::Cancelled;
+            enqueue_locked(context.node);
+        }
+        ready_.clear();
+        ready_cv_.notify_all();
+    }
+    bool wait_ready(std::stop_token stop) {
+        std::unique_lock lock(coordinator_);
+        ready_cv_.wait(lock,stop,[&]{return closing_ || !ready_.empty();});
+        return !stop.stop_requested() && !closing_ && !ready_.empty();
+    }
+    bool wait_completion(std::stop_token stop) {
+        std::unique_lock lock(coordinator_);
+        completion_cv_.wait(lock,stop,[&]{return completion_head_ != nullptr;});
+        return completion_head_ != nullptr;
+    }
+    void wait_drained() {
+        std::unique_lock lock(coordinator_);
+        drain_cv_.wait(lock,[&]{return jobs_.empty() && submissions_.empty() && !completion_head_;});
     }
     CoreStats inspect() const {
         std::lock_guard lock(coordinator_);

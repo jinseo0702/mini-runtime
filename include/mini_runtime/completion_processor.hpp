@@ -39,6 +39,7 @@ public:
         store_.submissions_.erase(context->submission_token);
         node->state = NodeState::RETIRED;
         context->counters->finalizations.fetch_add(1);
+        store_.drain_cv_.notify_all();
         return true;
     }
 };

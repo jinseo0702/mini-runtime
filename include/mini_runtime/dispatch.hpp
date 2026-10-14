@@ -40,7 +40,7 @@ public:
         CompletionCallback callback;
         {
             std::lock_guard lock(store_.coordinator_);
-            if (store_.ready_.empty()) return false;
+            if (store_.closing_ || store_.ready_.empty()) return false;
             auto& job = store_.jobs_.at(store_.ready_.front());
             context = job.context; // Handoff lease survives even immediate completion.
             context->phase = SubmissionPhase::SUBMITTING;

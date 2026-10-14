@@ -118,7 +118,7 @@ public:
             if (!id) return fail(std::move(id.error()));
             if (id.value() == 0 || id.value() == UINT64_MAX)
                 return fail(make_error(ErrorCode::RUNTIME_ID_EXHAUSTED,"Invalid runtime ID"));
-            id_ = id.value();
+            { std::lock_guard lock(coordinator_); id_ = id.value(); }
             if (deps_.initialized) {
                 auto initialized = deps_.initialized(id_);
                 if (!initialized) return fail(std::move(initialized.error()));
@@ -139,12 +139,15 @@ public:
     }
     RuntimeState state() const { std::lock_guard lock(coordinator_); return state_; }
     RuntimeState state_locked() const { return state_; }
-    uint64_t runtime_id() const { return id_; }
+    uint64_t runtime_id() const { std::lock_guard lock(coordinator_); return id_; }
     IExecutionBackend* backend() { return backend_.get(); }
     OperationRegistry& operations() { return operations_; }
     size_t worker_count() const { return size_t(completion_.joinable()) + size_t(scheduler_.joinable()); }
     R begin_shutdown() {
         std::lock_guard lock(coordinator_);
+        return begin_shutdown_locked();
+    }
+    R begin_shutdown_locked() {
         if (auto e = check_shutdown(state_)) return error(*e);
         state_ = RuntimeState::SHUTTING_DOWN; return R::ok();
     }
