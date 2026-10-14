@@ -23,6 +23,8 @@ class Runtime {
     detail::CompletionProcessor processor_;
     std::unique_ptr<detail::Dispatcher> dispatcher_;
     std::function<void(std::stop_token)> before_schedule_;
+    // Testing-only, immutable and nonthrowing by contract.
+    std::function<void()> after_dispatch_;
     detail::StartupDependencies configure(std::shared_ptr<IBackendFactory> factory,detail::StartupDependencies deps) {
         deps.factory = std::move(factory);
         auto initialized = std::move(deps.initialized);
@@ -36,7 +38,11 @@ class Runtime {
             if (role == detail::WorkerRole::Scheduler) {
                 while (store_.wait_ready(stop)) {
                     if (before_schedule_) before_schedule_(stop);
-                    if (!stop.stop_requested()) dispatcher_->dispatch_one();
+                    if (!stop.stop_requested() && dispatcher_->dispatch_one()) {
+                        // dispatch_one has returned: all local handoff owners are gone
+                        // and Coordinator is unlocked before observation.
+                        if (after_dispatch_) after_dispatch_();
+                    }
                 }
             } else {
                 while (store_.wait_completion(stop)) processor_.process_one();
@@ -46,13 +52,13 @@ class Runtime {
     }
     Runtime(std::shared_ptr<IBackendFactory> factory,detail::StartupDependencies deps,
             detail::IAllocationGate* gate,uint64_t event,uint64_t job,uint64_t token,
-            std::function<void(std::stop_token)> before)
+            std::function<void(std::stop_token)> before, std::function<void()> after)
         : events_(coordinator_,0,event), startup_(coordinator_,configure(std::move(factory),std::move(deps))),
           store_(coordinator_,events_,startup_.operations(),gate,job,token), ingress_(store_),
-          processor_(store_), before_schedule_(std::move(before)) { store_.attach_sink(ingress_); }
+          processor_(store_), before_schedule_(std::move(before)), after_dispatch_(std::move(after)) { store_.attach_sink(ingress_); }
 public:
     explicit Runtime(std::shared_ptr<IBackendFactory> factory)
-        : Runtime(std::move(factory),{},nullptr,1,1,1,{}) {}
+        : Runtime(std::move(factory),{},nullptr,1,1,1,{},{}) {}
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
     Runtime(Runtime&&) = delete;
