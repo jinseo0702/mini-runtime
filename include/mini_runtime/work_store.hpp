@@ -78,6 +78,15 @@ class WorkStore {
     CompletionNode* completion_head_ = nullptr;
     CompletionNode* completion_tail_ = nullptr;
     size_t completion_size_ = 0;
+    // Caller holds Coordinator; only EMPTY/STAGED nodes may be published.
+    void enqueue_locked(CompletionNode& node) noexcept {
+        node.next = nullptr;
+        node.state = NodeState::QUEUED;
+        if (completion_tail_) completion_tail_->next = &node;
+        else completion_head_ = &node;
+        completion_tail_ = &node;
+        ++completion_size_;
+    }
     void allocation(AdmissionPoint p) { if (gate_ && !gate_->allow(p)) throw std::bad_alloc(); }
     static Result<EventHandle,RuntimeError> fail(ErrorCode c) {
         return Result<EventHandle,RuntimeError>::err(make_error(c, {}));
